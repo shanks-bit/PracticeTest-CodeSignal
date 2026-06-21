@@ -1,219 +1,550 @@
-/**
- * In-Memory Database Interface
- *
- * This interface defines the operations for an in-memory key-value database
- * with field-level granularity, TTL support, and backup/restore capabilities.
- */
-public interface InMemoryDatabase {
+import java.util.*;
 
-    // Level 1 Methods: Basic Field Operations
+public class InMemoryDatabaseImpl implements InMemoryDatabase {
 
-    /**
-     * Set a field value for a key.
-     *
-     * @param key The key to set the field for
-     * @param field The field name
-     * @param value The value to set
-     * @return The value that was set
-     */
-    String setField(String key, String field, String value);
+    static class FieldData {
+        String value;
+        long expiryTime; // -1 = no TTL
 
-    /**
-     * Get a field value for a key.
-     *
-     * @param key The key to get the field from
-     * @param field The field name
-     * @return The field value, or "" if key or field doesn't exist
-     */
-    String getField(String key, String field);
+        FieldData(String value, long expiryTime) {
+            this.value = value;
+            this.expiryTime = expiryTime;
+        }
 
-    /**
-     * Delete a field from a key.
-     *
-     * @param key The key to delete the field from
-     * @param field The field name to delete
-     * @return "true" if field was deleted, "false" otherwise
-     */
-    String deleteField(String key, String field);
+        boolean isExpired(long timestamp) {
+            return expiryTime != -1 && timestamp >= expiryTime;
+        }
+    }
 
-    /**
-     * Get all fields for a key.
-     *
-     * @param key The key to get all fields from
-     * @return Formatted string:
-     *         "field1(value1), field2(value2), ..."
-     *         sorted alphabetically by field name,
-     *         or "" if key doesn't exist
-     */
-    String get(String key);
+    static class BackupData {
+        Map<String, Map<String, FieldData>> data;
+        long timestamp;
 
-    /**
-     * Delete a key and all its fields.
-     *
-     * @param key The key to delete
-     * @return "true" if key was deleted, "false" otherwise
-     */
-    String delete(String key);
+        BackupData(Map<String, Map<String, FieldData>> data,
+                   long timestamp) {
+            this.data = data;
+            this.timestamp = timestamp;
+        }
+    }
 
-    // Level 2 Methods: Filtering and Querying
+    private final Map<String, Map<String, FieldData>> db;
+    private final Map<String, BackupData> backups;
+    private int backupCounter;
 
-    /**
-     * Get all keys that start with the given prefix.
-     *
-     * @param prefix The prefix to match keys against
-     * @return Comma-separated list of matching keys sorted alphabetically,
-     *         or "" if no matches found
-     */
-    String scan(String prefix);
+    public InMemoryDatabaseImpl() {
+        db = new HashMap<>();
+        backups = new HashMap<>();
+        backupCounter = 1;
+    }
 
-    /**
-     * Get all keys that have a specific field with a specific value.
-     *
-     * @param field The field name to search for
-     * @param value The value to match
-     * @return Comma-separated list of matching keys sorted alphabetically,
-     *         or "" if no matches found
-     */
-    String scanByField(String field, String value);
+    private boolean validField(long timestamp,
+                               FieldData field) {
+        return field != null &&
+                !field.isExpired(timestamp);
+    }
 
-    /**
-     * Get the top N keys by number of fields.
-     *
-     * @param n Number of top keys to return
-     * @return Formatted string:
-     *         "key1(count), key2(count), ..."
-     *         sorted by field count descending,
-     *         then by key name ascending
-     */
-    String topNKeys(int n);
+    private void removeExpired(long timestamp) {
 
-    // Level 3 Methods: Time-Aware Operations with TTL
+        Iterator<Map.Entry<String,
+                Map<String, FieldData>>> keyIterator =
+                db.entrySet().iterator();
 
-    /**
-     * Set a field value for a key at a specific timestamp.
-     *
-     * @param timestamp Operation timestamp
-     * @param key The key
-     * @param field The field name
-     * @param value The value
-     * @return The value that was set
-     */
-    String setFieldAt(int timestamp,
-                      String key,
-                      String field,
-                      String value);
+        while (keyIterator.hasNext()) {
 
-    /**
-     * Set a field value with a TTL.
-     *
-     * @param timestamp Operation timestamp
-     * @param key The key
-     * @param field The field name
-     * @param value The value
-     * @param ttl Time-to-live in milliseconds
-     * @return The value that was set
-     */
-    String setFieldWithTtl(int timestamp,
-                           String key,
+            Map<String, FieldData> fields =
+                    keyIterator.next().getValue();
+
+            fields.entrySet().removeIf(
+                    entry ->
+                            entry.getValue()
+                                    .isExpired(timestamp));
+
+            if (fields.isEmpty()) {
+                keyIterator.remove();
+            }
+        }
+    }
+
+    // ---------------- LEVEL 1 ----------------
+
+    @Override
+    public String setField(String key,
                            String field,
-                           String value,
-                           int ttl);
+                           String value) {
 
-    /**
-     * Get a field value at a specific timestamp.
-     *
-     * @param timestamp Query timestamp
-     * @param key The key
-     * @param field The field name
-     * @return Field value if not expired, otherwise ""
-     */
-    String getFieldAt(int timestamp,
-                      String key,
-                      String field);
+        db.computeIfAbsent(key,
+                k -> new HashMap<>())
+                .put(field,
+                        new FieldData(value, -1));
 
-    /**
-     * Get all non-expired fields for a key.
-     *
-     * @param timestamp Query timestamp
-     * @param key The key
-     * @return Formatted string:
-     *         "field1(value1), field2(value2), ..."
-     *         or "" if key doesn't exist or all fields expired
-     */
-    String getAt(int timestamp,
-                 String key);
+        return value;
+    }
 
-    /**
-     * Get all keys with non-expired fields that start with the prefix.
-     *
-     * @param timestamp Query timestamp
-     * @param prefix Key prefix
-     * @return Comma-separated list of matching keys
-     */
-    String scanAt(int timestamp,
-                  String prefix);
+    @Override
+    public String getField(String key,
+                           String field) {
 
-    /**
-     * Get all keys that have a non-expired field with a specific value.
-     *
-     * @param timestamp Query timestamp
-     * @param field Field name
-     * @param value Field value
-     * @return Comma-separated list of matching keys
-     */
-    String scanByFieldAt(int timestamp,
-                         String field,
-                         String value);
+        if (!db.containsKey(key)) {
+            return "";
+        }
 
-    /**
-     * Delete a field at a specific timestamp.
-     *
-     * @param timestamp Operation timestamp
-     * @param key The key
-     * @param field The field
-     * @return "true" if deleted, "false" otherwise
-     */
-    String deleteFieldAt(int timestamp,
-                         String key,
-                         String field);
+        FieldData data =
+                db.get(key).get(field);
 
-    // Level 4 Methods: Backup and Restore
+        return data == null
+                ? ""
+                : data.value;
+    }
 
-    /**
-     * Create a backup of the database.
-     *
-     * @param timestamp Backup timestamp
-     * @return Backup ID (e.g. "backup_1")
-     */
-    String backup(int timestamp);
+    @Override
+    public String deleteField(String key,
+                              String field) {
 
-    /**
-     * Get information about a backup.
-     *
-     * @param backupId Backup ID
-     * @return "keys:N,fields:M,timestamp:T"
-     */
-    String getBackupInfo(String backupId);
+        if (!db.containsKey(key)
+                || !db.get(key)
+                .containsKey(field)) {
+            return "false";
+        }
 
-    /**
-     * Restore the database from a backup.
-     *
-     * @param timestamp Restore timestamp
-     * @param backupId Backup ID
-     * @return Number of keys restored as a string
-     */
-    String restore(int timestamp,
-                   String backupId);
+        db.get(key).remove(field);
 
-    /**
-     * Compare two backups.
-     *
-     * @param backupId1 First backup
-     * @param backupId2 Second backup
-     * @return Comma-separated list of differing keys,
-     *         sorted alphabetically,
-     *         or "" if no differences found
-     */
-    String compare(String backupId1,
-                   String backupId2);
+        if (db.get(key).isEmpty()) {
+            db.remove(key);
+        }
+
+        return "true";
+    }
+
+    @Override
+    public String get(String key) {
+
+        if (!db.containsKey(key)) {
+            return "";
+        }
+
+        List<String> fields =
+                new ArrayList<>(
+                        db.get(key).keySet());
+
+        Collections.sort(fields);
+
+        List<String> result =
+                new ArrayList<>();
+
+        for (String field : fields) {
+
+            result.add(
+                    field + "(" +
+                            db.get(key)
+                                    .get(field)
+                                    .value +
+                            ")");
+        }
+
+        return String.join(", ",
+                result);
+    }
+
+    @Override
+    public String delete(String key) {
+
+        if (!db.containsKey(key)) {
+            return "false";
+        }
+
+        db.remove(key);
+
+        return "true";
+    }
+
+    // ---------------- LEVEL 2 ----------------
+
+    @Override
+    public String scan(String prefix) {
+
+        List<String> result =
+                new ArrayList<>();
+
+        for (String key :
+                db.keySet()) {
+
+            if (key.startsWith(prefix)) {
+                result.add(key);
+            }
+        }
+
+        Collections.sort(result);
+
+        return String.join(", ",
+                result);
+    }
+
+    @Override
+    public String scanByField(String field,
+                              String value) {
+
+        List<String> result =
+                new ArrayList<>();
+
+        for (String key :
+                db.keySet()) {
+
+            FieldData data =
+                    db.get(key)
+                            .get(field);
+
+            if (data != null
+                    && data.value.equals(value)) {
+
+                result.add(key);
+            }
+        }
+
+        Collections.sort(result);
+
+        return String.join(", ",
+                result);
+    }
+
+    @Override
+    public String topNKeys(int n) {
+
+        List<String> keys =
+                new ArrayList<>(
+                        db.keySet());
+
+        keys.sort((a, b) -> {
+
+            int sizeA =
+                    db.get(a).size();
+
+            int sizeB =
+                    db.get(b).size();
+
+            if (sizeA != sizeB) {
+                return sizeB - sizeA;
+            }
+
+            return a.compareTo(b);
+        });
+
+        List<String> result =
+                new ArrayList<>();
+
+        for (int i = 0;
+             i < Math.min(n,
+                     keys.size());
+             i++) {
+
+            String key =
+                    keys.get(i);
+
+            result.add(
+                    key + "(" +
+                            db.get(key)
+                                    .size() +
+                            ")");
+        }
+
+        return String.join(", ",
+                result);
+    }
+
+    // ---------------- LEVEL 3 ----------------
+
+    @Override
+    public String setFieldAt(int timestamp,
+                             String key,
+                             String field,
+                             String value) {
+
+        removeExpired(timestamp);
+
+        db.computeIfAbsent(key,
+                k -> new HashMap<>())
+                .put(field,
+                        new FieldData(
+                                value,
+                                -1));
+
+        return value;
+    }
+
+    @Override
+    public String setFieldWithTtl(int timestamp,
+                                  String key,
+                                  String field,
+                                  String value,
+                                  int ttl) {
+
+        removeExpired(timestamp);
+
+        db.computeIfAbsent(key,
+                k -> new HashMap<>())
+                .put(field,
+                        new FieldData(
+                                value,
+                                (long) timestamp + ttl));
+
+        return value;
+    }
+
+    @Override
+    public String getFieldAt(int timestamp,
+                             String key,
+                             String field) {
+
+        removeExpired(timestamp);
+
+        if (!db.containsKey(key)) {
+            return "";
+        }
+
+        FieldData data =
+                db.get(key).get(field);
+
+        return validField(timestamp,
+                data)
+                ? data.value
+                : "";
+    }
+
+    @Override
+    public String getAt(int timestamp,
+                        String key) {
+
+        removeExpired(timestamp);
+
+        if (!db.containsKey(key)) {
+            return "";
+        }
+
+        List<String> fields =
+                new ArrayList<>(
+                        db.get(key).keySet());
+
+        Collections.sort(fields);
+
+        List<String> result =
+                new ArrayList<>();
+
+        for (String field : fields) {
+
+            FieldData data =
+                    db.get(key)
+                            .get(field);
+
+            if (!data.isExpired(
+                    timestamp)) {
+
+                result.add(
+                        field + "(" +
+                                data.value +
+                                ")");
+            }
+        }
+
+        return String.join(", ",
+                result);
+    }
+
+    @Override
+    public String scanAt(int timestamp,
+                         String prefix) {
+
+        removeExpired(timestamp);
+
+        return scan(prefix);
+    }
+
+    @Override
+    public String scanByFieldAt(int timestamp,
+                                String field,
+                                String value) {
+
+        removeExpired(timestamp);
+
+        return scanByField(field,
+                value);
+    }
+
+    @Override
+    public String deleteFieldAt(int timestamp,
+                                String key,
+                                String field) {
+
+        removeExpired(timestamp);
+
+        return deleteField(key,
+                field);
+    }
+
+    // ---------------- LEVEL 4 ----------------
+
+    @Override
+    public String backup(int timestamp) {
+
+        removeExpired(timestamp);
+
+        Map<String,
+                Map<String, FieldData>> copy =
+                new HashMap<>();
+
+        for (String key :
+                db.keySet()) {
+
+            Map<String, FieldData> fields =
+                    new HashMap<>();
+
+            for (Map.Entry<String,
+                    FieldData> entry :
+                    db.get(key).entrySet()) {
+
+                FieldData field =
+                        entry.getValue();
+
+                fields.put(
+                        entry.getKey(),
+                        new FieldData(
+                                field.value,
+                                field.expiryTime));
+            }
+
+            copy.put(key,
+                    fields);
+        }
+
+        String backupId =
+                "backup_" +
+                        backupCounter++;
+
+        backups.put(
+                backupId,
+                new BackupData(
+                        copy,
+                        timestamp));
+
+        return backupId;
+    }
+
+    @Override
+    public String getBackupInfo(
+            String backupId) {
+
+        BackupData backup =
+                backups.get(backupId);
+
+        if (backup == null) {
+            return "";
+        }
+
+        int keys =
+                backup.data.size();
+
+        int fields = 0;
+
+        for (Map<String, FieldData> map :
+                backup.data.values()) {
+
+            fields += map.size();
+        }
+
+        return "keys:" + keys
+                + ",fields:" + fields
+                + ",timestamp:"
+                + backup.timestamp;
+    }
+
+    @Override
+    public String restore(int timestamp,
+                          String backupId) {
+
+        BackupData backup =
+                backups.get(backupId);
+
+        if (backup == null) {
+            return "0";
+        }
+
+        db.clear();
+
+        for (String key :
+                backup.data.keySet()) {
+
+            Map<String, FieldData> fields =
+                    new HashMap<>();
+
+            for (Map.Entry<String,
+                    FieldData> entry :
+                    backup.data.get(key)
+                            .entrySet()) {
+
+                FieldData field =
+                        entry.getValue();
+
+                fields.put(
+                        entry.getKey(),
+                        new FieldData(
+                                field.value,
+                                field.expiryTime));
+            }
+
+            db.put(key,
+                    fields);
+        }
+
+        return String.valueOf(
+                db.size());
+    }
+
+    @Override
+    public String compare(String backupId1,
+                          String backupId2) {
+
+        BackupData b1 =
+                backups.get(backupId1);
+
+        BackupData b2 =
+                backups.get(backupId2);
+
+        if (b1 == null
+                || b2 == null) {
+            return "";
+        }
+
+        Set<String> allKeys =
+                new HashSet<>();
+
+        allKeys.addAll(
+                b1.data.keySet());
+
+        allKeys.addAll(
+                b2.data.keySet());
+
+        List<String> differences =
+                new ArrayList<>();
+
+        for (String key :
+                allKeys) {
+
+            Map<String, FieldData> map1 =
+                    b1.data.get(key);
+
+            Map<String, FieldData> map2 =
+                    b2.data.get(key);
+
+            if (!Objects.equals(
+                    String.valueOf(map1),
+                    String.valueOf(map2))) {
+
+                differences.add(key);
+            }
+        }
+
+        Collections.sort(
+                differences);
+
+        return String.join(", ",
+                differences);
+    }
 }
